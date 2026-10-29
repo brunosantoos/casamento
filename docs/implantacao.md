@@ -18,3 +18,11 @@ de integração precisam ser recadastradas e os links de convite reemitidos.
 
 Parâmetros operacionais (prazos, limites, horário de envio, tipos de arquivo, retenção, limite de IA) ficam em
 Configurações → Operacional, com histórico.
+
+## Deploy automático (GitHub Actions)
+
+`.github/workflows/deploy.yml`: todo push na `main` roda typecheck e testes (com Postgres) e, se passar, publica na VPS.
+O job de deploy entra por SSH com uma chave exclusiva (secrets `DEPLOY_SSH_KEY`, `DEPLOY_KNOWN_HOSTS`, `DEPLOY_HOST`) que,
+no `authorized_keys`, está presa a `command="/usr/local/bin/casamento-deploy"` — ela não abre shell nem roda outro comando.
+O script (cópia de `deploy/deploy.sh`) só publica um SHA que esteja na `main`, reconstrói os containers e confere o `/health`.
+Ao alterar `deploy/deploy.sh`, reinstale-o na VPS: `install -m 755 deploy/deploy.sh /usr/local/bin/casamento-deploy`.

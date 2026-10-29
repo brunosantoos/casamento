@@ -1,4 +1,5 @@
 import { TRPCClientError } from "@trpc/client";
+import { Countdown } from "./Countdown";
 import { GiftsSection } from "./GiftsSection";
 import { PhotosSection } from "./PhotosSection";
 import { CalendarHeart, CheckCircle2, Gift, Loader2, MapPin, Plus, Shirt, Trash2 } from "lucide-react";
@@ -131,6 +132,7 @@ export function WeddingInfo({ w, photos }: { w: PortalWedding; photos?: PortalPh
         {w.city && <p className="text-sm text-[oklch(0.45_0.03_30)]">{w.city}</p>}
         <div className="mx-auto mt-6 h-px w-24 bg-[oklch(0.74_0.11_80)]" />
       </header>
+      {w.date && <Countdown date={w.date} timezone={w.timezone} />}
       <PortalGallery items={photos?.gallery ?? []} />
       {str(cfg.welcome) && <p className="mt-8 text-center text-[17px] leading-relaxed whitespace-pre-wrap">{str(cfg.welcome)}</p>}
       <div className="mt-8 grid gap-3">
