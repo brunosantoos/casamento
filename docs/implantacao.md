@@ -3,13 +3,12 @@
 1. Crie os segredos fora do repositório (Docker secrets):
    ```bash
    mkdir -p deploy/secrets
-   for s in master_key better_auth_secret db_password s3_secret_key; do openssl rand -hex 32 > deploy/secrets/$s; done
-   echo -n casa-minio > deploy/secrets/s3_access_key
+   for s in master_key better_auth_secret db_password; do openssl rand -hex 32 | tr -d '\n' > deploy/secrets/$s; done
+   chmod 644 deploy/secrets/*   # o container roda como usuário node
    ```
    `deploy/with-secrets.sh` lê `/run/secrets/*` para variáveis do processo. Nenhum segredo vai para o front, banco em claro ou logs.
 2. Ajuste `WEB_ORIGIN`, `API_URL`, `SMTP_*` em `deploy/docker-compose.prod.yml` (não secretos).
-3. `docker compose -f deploy/docker-compose.prod.yml up -d --build` (`minio-init` cria o bucket privado e `migrate`
-   aplica as migrações antes da API/worker). O `web` escuta só em `127.0.0.1:8090`.
+3. `docker compose -f deploy/docker-compose.prod.yml up -d --build` (`migrate` aplica as migrações antes da API/worker). Arquivos ficam no volume `files`; o `web` escuta só em `127.0.0.1:8090`.
 4. TLS: adicione o bloco de `deploy/Caddyfile` ao Caddy do host (`/etc/caddy/Caddyfile`) e rode `systemctl reload caddy`.
    O nginx do `web` já envia HSTS/CSP e confia no `X-Forwarded-For` do Caddy para o IP real.
 5. Acesse `/instalacao` para criar o administrador e, em seguida, configure Evolution e IA no painel.

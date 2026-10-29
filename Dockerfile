@@ -30,7 +30,7 @@ EXPOSE 8080
 
 FROM source AS server
 ENV NODE_ENV=production
-RUN chown -R node:node /app/apps /app/packages
+RUN mkdir -p /data/storage && chown -R node:node /app/apps /app/packages /data/storage
 USER node
 WORKDIR /app/apps/api
 EXPOSE 4100
