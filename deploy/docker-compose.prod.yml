@@ -1,0 +1,87 @@
+# Produção. Segredos via Docker secrets (arquivos fora do repositório) — nada de .env com chaves.
+#   echo -n "$(openssl rand -hex 32)" > deploy/secrets/master_key   (idem better_auth_secret, db_password)
+# TLS fica no Caddy do host (deploy/Caddyfile): o web só escuta em 127.0.0.1:8090.
+name: casamento
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: casa
+      POSTGRES_DB: casamento
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    secrets: [db_password]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U casa"], interval: 5s, retries: 10 }
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data
+    environment: { MINIO_ROOT_USER_FILE: /run/secrets/s3_access_key, MINIO_ROOT_PASSWORD_FILE: /run/secrets/s3_secret_key }
+    secrets: [s3_access_key, s3_secret_key]
+    volumes: [miniodata:/data]
+    healthcheck: { test: ["CMD", "mc", "ready", "local"], interval: 5s, retries: 10 }
+
+  # Cria o bucket privado na primeira subida (idempotente)
+  minio-init:
+    image: minio/minio:latest
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["mc alias set local http://minio:9000 \"$$(cat /run/secrets/s3_access_key)\" \"$$(cat /run/secrets/s3_secret_key)\" && mc mb --ignore-existing local/casamento && mc anonymous set none local/casamento"]
+    secrets: [s3_access_key, s3_secret_key]
+    depends_on: { minio: { condition: service_healthy } }
+
+  migrate:
+    build: { context: .., target: server }
+    entrypoint: ["/bin/sh", "/app/deploy/with-secrets.sh"]
+    command: ["sh", "-c", "cd /app/packages/db && ./node_modules/.bin/prisma migrate deploy"]
+    secrets: [db_password, master_key, better_auth_secret, s3_access_key, s3_secret_key]
+    environment: &env
+      DB_HOST: postgres
+      WEB_ORIGIN: https://casamento.brunocristiano.com.br
+      API_URL: https://casamento.brunocristiano.com.br
+      STORAGE_DRIVER: s3
+      S3_ENDPOINT: http://minio:9000
+      S3_BUCKET: casamento
+      # Sem SMTP_HOST os e-mails só vão para o log. Para ativar: SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_FROM aqui
+      # e a senha em deploy/secrets/smtp_pass (lida por with-secrets.sh).
+    depends_on:
+      postgres: { condition: service_healthy }
+      minio-init: { condition: service_completed_successfully }
+
+  api:
+    build: { context: .., target: server }
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/app/deploy/with-secrets.sh"]
+    command: ["./node_modules/.bin/tsx", "src/index.ts"]
+    secrets: [db_password, master_key, better_auth_secret, s3_access_key, s3_secret_key]
+    environment: *env
+    depends_on: { migrate: { condition: service_completed_successfully } }
+
+  worker:
+    build: { context: .., target: server }
+    restart: unless-stopped
+    working_dir: /app/apps/worker
+    entrypoint: ["/bin/sh", "/app/deploy/with-secrets.sh"]
+    command: ["./node_modules/.bin/tsx", "src/index.ts"]
+    secrets: [db_password, master_key, better_auth_secret, s3_access_key, s3_secret_key]
+    environment: *env
+    depends_on: { migrate: { condition: service_completed_successfully } }
+
+  web:
+    build: { context: .., target: web }
+    restart: unless-stopped
+    ports: ["127.0.0.1:8090:8080"]
+    depends_on: [api]
+
+secrets:
+  db_password: { file: ./secrets/db_password }
+  master_key: { file: ./secrets/master_key }
+  better_auth_secret: { file: ./secrets/better_auth_secret }
+  s3_access_key: { file: ./secrets/s3_access_key }
+  s3_secret_key: { file: ./secrets/s3_secret_key }
+
+volumes:
+  pgdata:
+  miniodata:

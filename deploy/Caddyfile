@@ -1,0 +1,8 @@
+# Bloco para o Caddy do host (/etc/caddy/Caddyfile). Headers de segurança vêm do nginx do web.
+casamento.brunocristiano.com.br {
+	encode zstd gzip
+	request_body {
+		max_size 110MB
+	}
+	reverse_proxy 127.0.0.1:8090
+}

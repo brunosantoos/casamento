@@ -1,0 +1,27 @@
+{
+  "name": "Nosso Casamento",
+  "short_name": "Casamento",
+  "description": "Planejamento completo do casamento: financeiro, convidados, fornecedores, checklist e mais.",
+  "lang": "pt-BR",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#f7faf8",
+  "theme_color": "#0f9d6e",
+  "categories": ["productivity", "lifestyle"],
+  "launch_handler": { "client_mode": "navigate-existing" },
+  "prefer_related_applications": false,
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "Financeiro", "url": "/financeiro", "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }] },
+    { "name": "Checklist", "url": "/checklist", "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }] },
+    { "name": "Convidados", "url": "/convidados", "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }] },
+    { "name": "Carteiras", "url": "/financeiro/carteiras", "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }] }
+  ]
+}

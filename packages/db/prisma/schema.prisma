@@ -1,0 +1,1787 @@
+// Gestão de casamento — modelo de dados
+// Convenções:
+//  - Valores monetários em centavos (Int). Nunca ponto flutuante.
+//  - Instantes em UTC (timestamptz); exibição no fuso do casamento.
+//  - Todo dado de negócio pertence a um Wedding (isolamento por weddingId).
+//  - Registros financeiros não são apagados em cascata: cancelamento/estorno.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────── Identidade (better-auth) ───────────────────────────
+
+model User {
+  id            String    @id @default(cuid())
+  name          String
+  email         String    @unique
+  emailVerified Boolean   @default(false)
+  image         String?
+  active        Boolean   @default(true)
+  /// Administrador da plataforma (pode criar casamentos e ver auditoria global)
+  isSuperAdmin  Boolean   @default(false)
+  lastLoginAt   DateTime? @db.Timestamptz
+  activeWeddingId String?
+  pushSubscriptions PushSubscription[]
+  createdAt     DateTime  @default(now()) @db.Timestamptz
+  updatedAt     DateTime  @updatedAt @db.Timestamptz
+
+  sessions      Session[]
+  accounts      Account[]
+  memberships   WeddingMember[]
+  taskAssignments TaskAssignee[]
+
+  @@map("user")
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  expiresAt DateTime @db.Timestamptz
+  token     String   @unique
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+  ipAddress String?
+  userAgent String?
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("session")
+}
+
+model Account {
+  id                    String    @id @default(cuid())
+  accountId             String
+  providerId            String
+  userId                String
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime? @db.Timestamptz
+  refreshTokenExpiresAt DateTime? @db.Timestamptz
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now()) @db.Timestamptz
+  updatedAt             DateTime  @updatedAt @db.Timestamptz
+
+  @@index([userId])
+  @@map("account")
+}
+
+model Verification {
+  id         String   @id @default(cuid())
+  identifier String
+  value      String
+  expiresAt  DateTime @db.Timestamptz
+  createdAt  DateTime @default(now()) @db.Timestamptz
+  updatedAt  DateTime @updatedAt @db.Timestamptz
+
+  @@index([identifier])
+  @@map("verification")
+}
+
+// ─────────────────────────── Permissões ───────────────────────────
+
+/// Perfil por casamento. Perfis de sistema (system=true) são recriados no seed e não podem ser excluídos.
+model Role {
+  id          String   @id @default(cuid())
+  weddingId   String
+  wedding     Wedding  @relation(fields: [weddingId], references: [id], onDelete: Cascade)
+  key         String
+  name        String
+  description String?
+  system      Boolean  @default(false)
+  /// Lista de permissões efetivas no formato "modulo:acao" (ex.: "finance:view")
+  permissions String[]
+  createdAt   DateTime @default(now()) @db.Timestamptz
+  updatedAt   DateTime @updatedAt @db.Timestamptz
+
+  members     WeddingMember[]
+  invitations Invitation[]
+
+  @@unique([weddingId, key])
+}
+
+model WeddingMember {
+  id        String   @id @default(cuid())
+  weddingId String
+  wedding   Wedding  @relation(fields: [weddingId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  roleId    String
+  role      Role     @relation(fields: [roleId], references: [id])
+  /// Ajustes finos sobre o perfil
+  grants    String[]
+  revokes   String[]
+  active    Boolean  @default(true)
+  notificationPrefs Json @default("{}")
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  @@unique([weddingId, userId])
+  @@index([userId])
+}
+
+/// Convite para o painel (não confundir com convite de convidado)
+model Invitation {
+  id          String    @id @default(cuid())
+  weddingId   String
+  wedding     Wedding   @relation(fields: [weddingId], references: [id], onDelete: Cascade)
+  email       String
+  name        String?
+  roleId      String
+  role        Role      @relation(fields: [roleId], references: [id])
+  tokenHash   String    @unique
+  expiresAt   DateTime  @db.Timestamptz
+  acceptedAt  DateTime? @db.Timestamptz
+  revokedAt   DateTime? @db.Timestamptz
+  invitedById String?
+  createdAt   DateTime  @default(now()) @db.Timestamptz
+
+  @@index([weddingId])
+}
+
+// ─────────────────────────── Casamento e configurações ───────────────────────────
+
+model Wedding {
+  id               String    @id @default(cuid())
+  name             String
+  partner1Name     String
+  partner2Name     String
+  date             DateTime? @db.Timestamptz
+  timezone         String    @default("America/Sao_Paulo")
+  city             String?
+  ceremonyAddress  String?
+  receptionAddress String?
+  budgetCents      Int       @default(0)
+  estimatedGuests  Int?
+  maxGuests        Int?
+  notes            String?
+  visualPrefs      Json      @default("{}")
+  /// Fotos de personalização (FileAsset de imagem do próprio casamento)
+  coverFileId          String?
+  coverPosition        String    @default("center")
+  partner1PhotoFileId  String?
+  partner2PhotoFileId  String?
+  portalGalleryFileIds String[]
+  // Presentes / Pix
+  giftsEnabled         Boolean   @default(false)
+  pixKey               String?
+  pixKeyType           String?   // CPF, CNPJ, EMAIL, PHONE, RANDOM
+  pixReceiverName      String?
+  pixCity              String?
+  giftsWalletId        String?
+  /// Tag de afiliado da Amazon (ex.: "casamento-20"), aplicada aos links sem tag
+  amazonAffiliateTag   String?
+  // Fotos dos convidados
+  guestPhotosEnabled   Boolean   @default(false)
+  guestPhotosMaxPerFamily Int    @default(20)
+  rsvpDeadline     DateTime? @db.Timestamptz
+  // Portal público
+  portalEnabled    Boolean   @default(false)
+  portalSlug       String?   @unique
+  portalConfig     Json      @default("{}")
+  archivedAt       DateTime? @db.Timestamptz
+  createdById      String?
+  createdAt        DateTime  @default(now()) @db.Timestamptz
+  updatedAt        DateTime  @updatedAt @db.Timestamptz
+
+  roles          Role[]
+  members        WeddingMember[]
+  invitations    Invitation[]
+  settings       WeddingSetting[]
+  categories     FinancialCategory[]
+  obligations    FinancialObligation[]
+  payments       Payment[]
+  incomes        Income[]
+  scenarios      BudgetScenario[]
+  wallets        Wallet[]
+  seatingTables  SeatingTable[]
+  giftItems      GiftItem[]
+  gifts          GiftContribution[]
+  guestPhotos    GuestPhoto[]
+  vendors        Vendor[]
+  tasks          Task[]
+  checklistTemplates ChecklistTemplate[]
+  events         CalendarEvent[]
+  ceremony       Ceremony?
+  venues         ReceptionVenue[]
+  schedule       EventScheduleItem[]
+  guestGroups    GuestGroup[]
+  guests         Guest[]
+  guestInvites   GuestInvitation[]
+  integrations   Integration[]
+  waInstances    WhatsAppInstance[]
+  templates      MessageTemplate[]
+  campaigns      MessageCampaign[]
+  outbound       OutboundMessage[]
+  inbound        InboundMessage[]
+  files          FileAsset[]
+  albums         PhotoAlbum[]
+  aiConversations AIConversation[]
+  aiProposals    AIActionProposal[]
+  analyses       DocumentAnalysis[]
+  auditLogs      AuditLog[]
+  reminders      Reminder[]
+}
+
+/// Parâmetros operacionais por casamento (não secretos), com histórico em SettingChange
+model WeddingSetting {
+  id        String   @id @default(cuid())
+  weddingId String
+  wedding   Wedding  @relation(fields: [weddingId], references: [id], onDelete: Cascade)
+  key       String
+  value     Json
+  updatedById String?
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  @@unique([weddingId, key])
+}
+
+/// Parâmetros globais da plataforma (não secretos)
+model SystemSetting {
+  key       String   @id
+  value     Json
+  updatedById String?
+  updatedAt DateTime @updatedAt @db.Timestamptz
+}
+
+model SettingChange {
+  id        String   @id @default(cuid())
+  scope     String   // "system" | weddingId
+  key       String
+  oldValue  Json?
+  newValue  Json?
+  userId    String?
+  createdAt DateTime @default(now()) @db.Timestamptz
+
+  @@index([scope, key, createdAt])
+}
+
+// ─────────────────────────── Financeiro ───────────────────────────
+
+model FinancialCategory {
+  id          String    @id @default(cuid())
+  weddingId   String
+  wedding     Wedding   @relation(fields: [weddingId], references: [id], onDelete: Cascade)
+  parentId    String?
+  parent      FinancialCategory?  @relation("CategoryTree", fields: [parentId], references: [id])
+  children    FinancialCategory[] @relation("CategoryTree")
+  name        String
+  color       String?
+  sortOrder   Int       @default(0)
+  /// Orçamento planejado para a categoria (centavos)
+  budgetCents Int       @default(0)
+  archivedAt  DateTime? @db.Timestamptz
+  createdAt   DateTime  @default(now()) @db.Timestamptz
+  updatedAt   DateTime  @updatedAt @db.Timestamptz
+
+  items       ObligationItem[]
+  obligations FinancialObligation[]
+  incomes     Income[]
+  vendors     Vendor[]
+
+  @@unique([weddingId, parentId, name])
+  @@index([weddingId])
+}
+
+enum ObligationStatus {
+  DRAFT      // em cotação/planejamento
+  ACTIVE     // contratada
+  CANCELLED
+}
+
+/// Uma contratação/despesa, composta por vários itens independentes
+model FinancialObligation {
+  id          String           @id @default(cuid())
+  weddingId   String
+  wedding     Wedding          @relation(fields: [weddingId], references: [id], onDelete: Restrict)
+  title       String
+  categoryId  String?
+  category    FinancialCategory? @relation(fields: [categoryId], references: [id])
+  vendorId    String?
+  vendor      Vendor?          @relation(fields: [vendorId], references: [id])
+  contractId  String?
+  contract    VendorContract?  @relation(fields: [contractId], references: [id])
+  status      ObligationStatus @default(DRAFT)
+  notes       String?
+  cancelledAt DateTime?        @db.Timestamptz
+  cancelReason String?
+  createdById String?
+  createdAt   DateTime         @default(now()) @db.Timestamptz
+  updatedAt   DateTime         @updatedAt @db.Timestamptz
+
+  items        ObligationItem[]
+  installments Installment[]
+  tasks        Task[]
+  events       CalendarEvent[]
+
+  @@index([weddingId, status])
+  @@index([vendorId])
+}
+
+enum ItemKind {
+  EXPENSE  // despesa normal
+  DEPOSIT  // caução (reembolsável)
+  ADVANCE  // adiantamento/sinal (abatido do total)
+  FEE      // taxa
+  OTHER
+}
+
+enum ChargeType {
+  ONE_TIME
+  PER_GUEST
+  PER_HOUR
+  PER_UNIT
+}
+
+enum ItemStatus {
+  PLANNED     // previsto
+  CONTRACTED  // contratado
+  CANCELLED
+}
+
+model ObligationItem {
+  id             String     @id @default(cuid())
+  obligationId   String
+  obligation     FinancialObligation @relation(fields: [obligationId], references: [id], onDelete: Restrict)
+  description    String
+  categoryId     String?
+  category       FinancialCategory? @relation(fields: [categoryId], references: [id])
+  kind           ItemKind   @default(EXPENSE)
+  chargeType     ChargeType @default(ONE_TIME)
+  unitCents      Int
+  quantity       Decimal    @default(1) @db.Decimal(12, 3)
+  discountCents  Int        @default(0)
+  surchargeCents Int        @default(0)
+  status         ItemStatus @default(PLANNED)
+  dueDate        DateTime?  @db.Timestamptz
+  /// Caução: parte retida pelo fornecedor (perdida) — não volta
+  forfeitedCents Int        @default(0)
+  notes          String?
+  sortOrder      Int        @default(0)
+  createdAt      DateTime   @default(now()) @db.Timestamptz
+  updatedAt      DateTime   @updatedAt @db.Timestamptz
+
+  installments   Installment[]
+  refunds        Income[]
+
+  @@index([obligationId])
+}
+
+/// Parcela. Status é calculado (previsto/a vencer/vencido/parcial/pago/cancelado).
+model Installment {
+  id           String    @id @default(cuid())
+  obligationId String
+  obligation   FinancialObligation @relation(fields: [obligationId], references: [id], onDelete: Restrict)
+  /// Opcional: parcela dedicada a um item (obrigatório para cauções)
+  itemId       String?
+  item         ObligationItem? @relation(fields: [itemId], references: [id])
+  number       Int
+  amountCents  Int
+  dueDate      DateTime  @db.Timestamptz
+  cancelledAt  DateTime? @db.Timestamptz
+  notes        String?
+  createdAt    DateTime  @default(now()) @db.Timestamptz
+  updatedAt    DateTime  @updatedAt @db.Timestamptz
+
+  allocations  PaymentAllocation[]
+
+  @@index([obligationId])
+  @@index([dueDate])
+}
+
+enum PaymentMethod {
+  PIX
+  CASH
+  CREDIT_CARD
+  DEBIT_CARD
+  BANK_TRANSFER
+  BOLETO
+  CHECK
+  OTHER
+}
+
+/// Liquidação financeira. Pode cobrir várias parcelas (PaymentAllocation).
+model Payment {
+  id             String        @id @default(cuid())
+  weddingId      String
+  wedding        Wedding       @relation(fields: [weddingId], references: [id], onDelete: Restrict)
+  amountCents    Int
+  paidAt         DateTime      @db.Timestamptz
+  method         PaymentMethod
+  reference      String?
+  notes          String?
+  receiptFileId  String?
+  /// Carteira de onde o dinheiro saiu (debita o saldo)
+  walletId       String?
+  wallet         Wallet?       @relation(fields: [walletId], references: [id])
+  /// Evita lançamento duplicado por duplo clique/reenvio
+  idempotencyKey String        @unique
+  reversedAt     DateTime?     @db.Timestamptz
+  reversalReason String?
+  createdById    String?
+  createdAt      DateTime      @default(now()) @db.Timestamptz
+
+  allocations    PaymentAllocation[]
+
+  @@index([weddingId, paidAt])
+}
+
+model PaymentAllocation {
+  id            String      @id @default(cuid())
+  paymentId     String
+  payment       Payment     @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  installmentId String
+  installment   Installment @relation(fields: [installmentId], references: [id], onDelete: Restrict)
+  amountCents   Int
+
+  @@unique([paymentId, installmentId])
+  @@index([installmentId])
+}
+
+enum IncomeKind {
+  GIFT_CASH
+  FAMILY
+  THIRD_PARTY
+  DEPOSIT_REFUND
+  REFUND
+  CHARGEBACK
+  OTHER
+}
+
+enum IncomeStatus {
+  PROMISED  // prometido
+  EXPECTED  // previsto
+  RECEIVED  // recebido
+  CANCELLED
+}
+
+model Income {
+  id            String       @id @default(cuid())
+  weddingId     String
+  wedding       Wedding      @relation(fields: [weddingId], references: [id], onDelete: Restrict)
+  kind          IncomeKind
+  status        IncomeStatus @default(EXPECTED)
+  description   String
+  source        String?
+  categoryId    String?
+  category      FinancialCategory? @relation(fields: [categoryId], references: [id])
+  amountCents   Int
+  expectedDate  DateTime?    @db.Timestamptz
+  receivedAt    DateTime?    @db.Timestamptz
+  method        PaymentMethod?
+  receiptFileId String?
+  /// Carteira que recebeu o dinheiro (credita o saldo quando RECEIVED)
+  walletId      String?
+  wallet        Wallet?      @relation(fields: [walletId], references: [id])
+  gift          GiftContribution?
+  /// Devolução de caução: aponta para o item DEPOSIT
+  depositItemId String?
+  depositItem   ObligationItem? @relation(fields: [depositItemId], references: [id])
+  notes         String?
+  idempotencyKey String?     @unique
+  createdById   String?
+  createdAt     DateTime     @default(now()) @db.Timestamptz
+  updatedAt     DateTime     @updatedAt @db.Timestamptz
+
+  @@index([weddingId, status])
+}
+
+enum WalletKind {
+  CHECKING
+  SAVINGS
+  CASH
+  CREDIT_CARD
+  INVESTMENT
+  OTHER
+}
+
+/// Carteira/conta: saldo inicial + entradas recebidas − pagamentos ± movimentos manuais
+model Wallet {
+  id                  String     @id @default(cuid())
+  weddingId           String
+  wedding             Wedding    @relation(fields: [weddingId], references: [id], onDelete: Restrict)
+  name                String
+  kind                WalletKind @default(CHECKING)
+  color               String?
+  openingBalanceCents Int        @default(0)
+  openingDate         DateTime   @db.Timestamptz
+  isDefault           Boolean    @default(false)
+  archivedAt          DateTime?  @db.Timestamptz
+  createdById         String?
+  createdAt           DateTime   @default(now()) @db.Timestamptz
+  updatedAt           DateTime   @updatedAt @db.Timestamptz
+
+  payments            Payment[]
+  incomes             Income[]
+  entries             WalletEntry[]
+
+  @@index([weddingId])
+}
+
+enum WalletEntryKind {
+  ADJUSTMENT
+  TRANSFER
+}
+
+/// Movimento manual: ajuste (±) ou perna de transferência (par com o mesmo transferGroupId)
+model WalletEntry {
+  id              String          @id @default(cuid())
+  walletId        String
+  wallet          Wallet          @relation(fields: [walletId], references: [id], onDelete: Restrict)
+  kind            WalletEntryKind
+  amountCents     Int
+  description     String
+  occurredAt      DateTime        @db.Timestamptz
+  transferGroupId String?
+  idempotencyKey  String?         @unique
+  reversedAt      DateTime?       @db.Timestamptz
+  createdById     String?
+  createdAt       DateTime        @default(now()) @db.Timestamptz
+
+  @@index([walletId, occurredAt])
+  @@index([transferGroupId])
+}
+
+/// Simulação: gastos hipotéticos que nunca entram nos totais reais
+model BudgetScenario {
+  id        String   @id @default(cuid())
+  weddingId String
+  wedding   Wedding  @relation(fields: [weddingId], references: [id], onDelete: Cascade)
+  name      String
+  /// [{ description, categoryId, amountCents, date }]
+  items     Json     @default("[]")
+  guestCount Int?
+  notes     String?
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+}
+
+// ─────────────────────────── Fornecedores e contratos ───────────────────────────
+
+enum VendorStatus {
+  RESEARCHED
+  CONTACTED
+  QUOTE_RECEIVED
+  NEGOTIATING
+  HIRED
+  COMPLETED
+  DISCARDED
+}
+
+model Vendor {
+  id            String       @id @default(cuid())
+  weddingId     String
+  wedding       Wedding      @relation(fields: [weddingId], references: [id], onDelete: Cascade)
+  name          String
+  legalName     String?
+  contactName   String?
+  categoryId    String?
+  category      FinancialCategory? @relation(fields: [categoryId], references: [id])
+  phone         String?
+  whatsapp      String?
+  email         String?
+  address       String?
+  document      String?
+  website       String?
+  instagram     String?
+  notes         String?
+  status        VendorStatus @default(RESEARCHED)
+  rating        Int?
+  lastContactAt DateTime?    @db.Timestamptz
+  mergedIntoId  String?
+  archivedAt    DateTime?    @db.Timestamptz
+  createdAt     DateTime     @default(now()) @db.Timestamptz
+  updatedAt     DateTime     @updatedAt @db.Timestamptz
+
+  contacts      VendorContact[]
+  quotes        VendorQuote[]
+  contracts     VendorContract[]
+  interactions  VendorInteraction[]
+  deliveries    VendorDelivery[]
+  obligations   FinancialObligation[]
+  tasks         Task[]
+  events        CalendarEvent[]
+  venues        ReceptionVenue[]
+  albumItems    PhotoAlbumItem[]
+
+  @@index([weddingId, status])
+}
+
+model VendorContact {
+  id       String  @id @default(cuid())
+  vendorId String
+  vendor   Vendor  @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  name     String
+  role     String?
+  phone    String?
+  email    String?
+}
+
+enum QuoteStatus {
+  REQUESTED
+  RECEIVED
+  ACCEPTED
+  REJECTED
+  EXPIRED
+}
+
+model VendorQuote {
+  id                  String      @id @default(cuid())
+  vendorId            String
+  vendor              Vendor      @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  title               String
+  status              QuoteStatus @default(RECEIVED)
+  totalCents          Int         @default(0)
+  validUntil          DateTime?   @db.Timestamptz
+  includedServices    String?
+  paymentTerms        String?
+  extraFees           String?
+  cancellationPenalty String?
+  availability        String?
+  notes               String?
+  fileId              String?
+  createdAt           DateTime    @default(now()) @db.Timestamptz
+  updatedAt           DateTime    @updatedAt @db.Timestamptz
+
+  items               VendorQuoteItem[]
+}
+
+model VendorQuoteItem {
+  id          String      @id @default(cuid())
+  quoteId     String
+  quote       VendorQuote @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+  description String
+  quantity    Decimal     @default(1) @db.Decimal(12, 3)
+  unitCents   Int
+}
+
+enum ContractStatus {
+  DRAFT
+  UNDER_REVIEW
+  SIGNED
+  COMPLETED
+  CANCELLED
+}
+
+model VendorContract {
+  id                 String         @id @default(cuid())
+  vendorId           String
+  vendor             Vendor         @relation(fields: [vendorId], references: [id], onDelete: Restrict)
+  title              String
+  status             ContractStatus @default(DRAFT)
+  signedAt           DateTime?      @db.Timestamptz
+  serviceDate        DateTime?      @db.Timestamptz
+  expiresAt          DateTime?      @db.Timestamptz
+  totalCents         Int            @default(0)
+  cancellationPolicy String?
+  notes              String?
+  fileId             String?
+  createdAt          DateTime       @default(now()) @db.Timestamptz
+  updatedAt          DateTime       @updatedAt @db.Timestamptz
+
+  clauses            ContractObligation[]
+  obligations        FinancialObligation[]
+}
+
+enum ObligationParty {
+  VENDOR
+  COUPLE
+}
+
+/// Obrigação contratual (não financeira): "entregar 300 fotos editadas até 60 dias"
+model ContractObligation {
+  id          String          @id @default(cuid())
+  contractId  String
+  contract    VendorContract  @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  description String
+  party       ObligationParty @default(VENDOR)
+  dueDate     DateTime?       @db.Timestamptz
+  doneAt      DateTime?       @db.Timestamptz
+}
+
+model VendorInteraction {
+  id         String   @id @default(cuid())
+  vendorId   String
+  vendor     Vendor   @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  type       String   // call, meeting, whatsapp, email, visit, note
+  occurredAt DateTime @db.Timestamptz
+  summary    String
+  userId     String?
+  createdAt  DateTime @default(now()) @db.Timestamptz
+}
+
+model VendorDelivery {
+  id          String    @id @default(cuid())
+  vendorId    String
+  vendor      Vendor    @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  description String
+  dueAt       DateTime? @db.Timestamptz
+  deliveredAt DateTime? @db.Timestamptz
+  notes       String?
+  createdAt   DateTime  @default(now()) @db.Timestamptz
+}
+
+// ─────────────────────────── Planejamento ───────────────────────────
+
+enum TaskStatus {
+  NOT_STARTED
+  IN_PROGRESS
+  WAITING_THIRD_PARTY
+  WAITING_APPROVAL
+  DONE
+  CANCELLED
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+model Task {
+  id           String     @id @default(cuid())
+  weddingId    String
+  wedding      Wedding    @relation(fields: [weddingId], references: [id], onDelete: Cascade)
+  title        String
+  description  String?
+  category     String?
+  phase        Int?
+  /// CHURCH | CELEBRANT | PLANNER | CEREMONY | RECEPTION — checklists específicos
+  area         String?
+  priority     Priority   @default(MEDIUM)
+  status       TaskStatus @default(NOT_STARTED)
+  dueDate      DateTime?  @db.Timestamptz
+  completedAt  DateTime?  @db.Timestamptz
+  archivedAt   DateTime?  @db.Timestamptz
+  notes        String?
+  vendorId     String?
+  vendor       Vendor?    @relation(fields: [vendorId], references: [id], onDelete: SetNull)
+  obligationId String?
+  obligation   FinancialObligation? @relation(fields: [obligationId], references: [id], onDelete: SetNull)
+  templateItemId String?
+  remindAt     DateTime?  @db.Timestamptz
+  createdById  String?
+  createdAt    DateTime   @default(now()) @db.Timestamptz
+  updatedAt    DateTime   @updatedAt @db.Timestamptz
+
+  assignees    TaskAssignee[]
+  dependsOn    TaskDependency[] @relation("TaskDeps")
+  blocks       TaskDependency[] @relation("TaskBlocks")
+  comments     TaskComment[]
+  events       CalendarEvent[]
+
+  @@index([weddingId, status])
+  @@index([weddingId, dueDate])
+}
+
+model TaskAssignee {
+  taskId String
+  task   Task   @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([taskId, userId])
+}
+
+model TaskDependency {
+  taskId      String
+  task        Task   @relation("TaskDeps", fields: [taskId], references: [id], onDelete: Cascade)
+  dependsOnId String
+  dependsOn   Task   @relation("TaskBlocks", fields: [dependsOnId], references: [id], onDelete: Cascade)
+
+  @@id([taskId, dependsOnId])
+}
+
+model TaskComment {
+  id        String   @id @default(cuid())
+  taskId    String
+  task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  userId    String?
+  body      String
+  createdAt DateTime @default(now()) @db.Timestamptz
+}
+
+/// Modelos de checklist. weddingId nulo = modelo padrão da plataforma.
+model ChecklistTemplate {
+  id        String   @id @default(cuid())
+  weddingId String?
+  wedding   Wedding? @relation(fields: [weddingId], references: [id], onDelete: Cascade)
+  name      String
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  items     ChecklistTemplateItem[]
+}
+
+model ChecklistTemplateItem {
+  id         String            @id @default(cuid())
+  templateId String
+  template   ChecklistTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  phase      Int
+  phaseName  String
+  title      String
+  description String?
+  area       String?
+  priority   Priority          @default(MEDIUM)
+  /// Prazo sugerido relativo à data do casamento (dias; negativo = antes). Editável.
+  offsetDays Int?
+  sortOrder  Int               @default(0)
+}
+
+enum EventType {
+  MEETING
+  FITTING
+  REHEARSAL
+  DELIVERY
+  VISIT
+  TASTING
+  IMPORTANT_DATE
+  OTHER
+}
+
+enum EventStatus {
+  SCHEDULED
+  CANCELLED
+  DONE
+}
+
+model CalendarEvent {
+  id           String      @id @default(cuid())
+  weddingId    String
+  wedding      Wedding     @relation(fields: [weddingId], references: [id], onDelete: Cascade)
+  title        String
+  type         EventType   @default(MEETING)
+  status       EventStatus @default(SCHEDULED)
+  startsAt     DateTime    @db.Timestamptz
+  endsAt       DateTime?   @db.Timestamptz
+  allDay       Boolean     @default(false)
+  location     String?
+  description  String?
+  assigneeIds  String[]
+  remindMinutesBefore Int?
+  taskId       String?
+  task         Task?       @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  vendorId     String?
+  vendor       Vendor?     @relation(fields: [vendorId], references: [id], onDelete: SetNull)
+  obligationId String?
+  obligation   FinancialObligation? @relation(fields: [obligationId], references: [id], onDelete: SetNull)
+  createdById  String?
+  createdAt    DateTime    @default(now()) @db.Timestamptz
+  updatedAt    DateTime    @updatedAt @db.Timestamptz
+
+  @@index([weddingId, startsAt])
+}
+
+/// Lembretes genéricos (tarefas, eventos, parcelas). Envio no worker.
+model Reminder {
+  id         String    @id @default(cuid())
+  weddingId  String
+  wedding    Wedding   @relation(fields: [weddingId], references: [id], onDelete: Cascade)
+  entityType String
+  entityId   String
+  userId     String?
+  remindAt   DateTime  @db.Timestamptz
+  channel    String    @default("EMAIL")
+  sentAt     DateTime? @db.Timestamptz
+  createdAt  DateTime  @default(now()) @db.Timestamptz
+
+  @@unique([entityType, entityId, userId, remindAt])
+  @@index([remindAt, sentAt])
+}
+
+// ─────────────────────────── Cerimônia e recepção ───────────────────────────
+
+model Ceremony {
+  id               String    @id @default(cuid())
+  weddingId        String    @unique
+  wedding          Wedding   @relation(fields: [weddingId], references: [id], onDelete: Cascade)
+  venueName        String?
+  address          String?
+  startsAt         DateTime? @db.Timestamptz
+  responsible      String?
+  contacts         String?
+  churchVendorId   String?
+  celebrantVendorId String?
+  plannerVendorId  String?
+  decorationRules  String?
+  photoRules       String?
+  requiredDocs     String?
+  deadlines        String?
+  prepCourse       String?
+  rehearsalAt      DateTime? @db.Timestamptz
+  readings         String?
+  music            String?
+  entranceOrder    String?
+  script           String?
+  restrictions     String?
+  notes            String?
+  updatedAt        DateTime  @updatedAt @db.Timestamptz
+
+  participants     CeremonyParticipant[]
+}
+
+model CeremonyParticipant {
+  id         String   @id @default(cuid())
+  ceremonyId String
+  ceremony   Ceremony @relation(fields: [ceremonyId], references: [id], onDelete: Cascade)
+  role       String   // GODPARENT, WITNESS, READER, MUSICIAN, RING_BEARER, OTHER
+  name       String
+  side       String?
+  guestId    String?
+  phone      String?
+  notes      String?
+  sortOrder  Int      @default(0)
+}
+
+model ReceptionVenue {
+  id                 String   @id @default(cuid())
+  weddingId          String
+  wedding            Wedding  @relation(fields: [weddingId], references: [id], onDelete: Cascade)
+  name               String
+  vendorId           String?
+  vendor             Vendor?  @relation(fields: [vendorId], references: [id], onDelete: SetNull)
+  chosen             Boolean  @default(false)
+  capacity           Int?
+  address            String?
+  usageHours         String?
+  setupRules         String?
+  soundRestrictions  String?
+  accessibility      String?
+  parking            String?
+  cancellationPolicy String?
+  contingencyPlan    String?
+  includedServices   String?
+  extraFees          String?
+  responsible        String?
+  notes              String?
+  createdAt          DateTime @default(now()) @db.Timestamptz
+  updatedAt          DateTime @updatedAt @db.Timestamptz
+}
+
+/// Cronograma do dia (preparação, cerimônia, recepção)
+model EventScheduleItem {
+  id          String   @id @default(cuid())
+  weddingId   String
+  wedding     Wedding  @relation(fields: [weddingId], references: [id], onDelete: Cascade)
+  area        String   // PREP, CEREMONY, RECEPTION, OTHER
+  startsAt    DateTime @db.Timestamptz
+  title       String
+  description String?
+  responsible String?
+  sortOrder   Int      @default(0)
+}
+
+// ─────────────────────────── Convidados ───────────────────────────
+
+enum RsvpStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+}
+
+enum InviteStatus {
+  NOT_SENT
+  SENT
+  DELIVERED
+  OPENED
+}
+
+/// Família/grupo. Unidade do convite e do link de confirmação.
+model GuestGroup {
+  id           String   @id @default(cuid())
+  weddingId    String
+  wedding      Wedding  @relation(fields: [weddingId], references: [id], onDelete: Cascade)
+  name         String
+  contactPhone String?
+  contactEmail String?
+  side         String?  // P1, P2, BOTH
+  notes        String?
+  createdAt    DateTime @default(now()) @db.Timestamptz
+  updatedAt    DateTime @updatedAt @db.Timestamptz
+
+  guests       Guest[]
+  invitations  GuestInvitation[]
+  gifts        GiftContribution[]
+  photos       GuestPhoto[]
+
+  @@index([weddingId])
+}
+
+/// Telefone NÃO é identificador: várias pessoas podem compartilhar o mesmo número.
+model Guest {
+  id              String       @id @default(cuid())
+  weddingId       String
+  wedding         Wedding      @relation(fields: [weddingId], references: [id], onDelete: Cascade)
+  groupId         String
+  group           GuestGroup   @relation(fields: [groupId], references: [id], onDelete: Restrict)
+  fullName        String
+  phone           String?
+  email           String?
+  relation        String?
+  side            String?
+  category        String?      // A, B, C… (prioridade do convite)
+  isChild         Boolean      @default(false)
+  age             Int?
+  isGroupLead     Boolean      @default(false)
+  plusOnesAllowed Int          @default(0)
+  inviteStatus    InviteStatus @default(NOT_SENT)
+  rsvpStatus      RsvpStatus   @default(PENDING)
+  rsvpAt          DateTime?    @db.Timestamptz
+  dietary         String?
+  accessibility   String?
+  tableName       String?
+  /// Mesa do mapa (acompanhantes sentam junto com o convidado)
+  tableId         String?
+  table           SeatingTable? @relation(fields: [tableId], references: [id], onDelete: SetNull)
+  seatOrder       Int?
+  notes           String?
+  deletedAt       DateTime?    @db.Timestamptz
+  createdAt       DateTime     @default(now()) @db.Timestamptz
+  updatedAt       DateTime     @updatedAt @db.Timestamptz
+
+  companions      GuestCompanion[]
+  rsvps           Rsvp[]
+  outbound        OutboundMessage[]
+  gifts           GiftContribution[]
+
+  @@index([weddingId, rsvpStatus])
+  @@index([groupId])
+  @@index([weddingId, phone])
+}
+
+/// Acompanhante sem cadastro próprio (+1)
+model GuestCompanion {
+  id        String   @id @default(cuid())
+  guestId   String
+  guest     Guest    @relation(fields: [guestId], references: [id], onDelete: Cascade)
+  name      String?
+  isChild   Boolean  @default(false)
+  attending Boolean  @default(true)
+  dietary   String?
+  createdAt DateTime @default(now()) @db.Timestamptz
+}
+
+/// Link de confirmação de uma família: token aleatório (só o hash é indexado), validade e revogação
+model GuestInvitation {
+  id          String     @id @default(cuid())
+  weddingId   String
+  wedding     Wedding    @relation(fields: [weddingId], references: [id], onDelete: Cascade)
+  groupId     String
+  group       GuestGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  tokenHash   String     @unique
+  /// Token cifrado com a MASTER_KEY para reexibir/reenviar o link
+  tokenEnc    String
+  expiresAt   DateTime?  @db.Timestamptz
+  revokedAt   DateTime?  @db.Timestamptz
+  sentAt      DateTime?  @db.Timestamptz
+  openedAt    DateTime?  @db.Timestamptz
+  respondedAt DateTime?  @db.Timestamptz
+  createdAt   DateTime   @default(now()) @db.Timestamptz
+
+  rsvps       Rsvp[]
+
+  @@index([groupId])
+}
+
+/// Histórico de respostas (a situação atual fica em Guest.rsvpStatus)
+model Rsvp {
+  id           String     @id @default(cuid())
+  invitationId String?
+  invitation   GuestInvitation? @relation(fields: [invitationId], references: [id], onDelete: SetNull)
+  guestId      String
+  guest        Guest      @relation(fields: [guestId], references: [id], onDelete: Cascade)
+  status       RsvpStatus
+  companions   Int        @default(0)
+  source       String     // PORTAL, WHATSAPP, ADMIN
+  message      String?
+  ip           String?
+  userAgent    String?
+  /// Chave da submissão: impede gravar duas vezes o mesmo envio
+  submissionKey String?
+  createdAt    DateTime   @default(now()) @db.Timestamptz
+
+  @@unique([guestId, submissionKey])
+  @@index([guestId, createdAt])
+}
+
+// ─────────────────────────── Integrações e mensagens ───────────────────────────
+
+enum IntegrationType {
+  EVOLUTION
+  AI
+  SMTP
+}
+
+/// Configuração não secreta. Segredos ficam em IntegrationSecret, cifrados.
+model Integration {
+  id        String          @id @default(cuid())
+  weddingId String
+  wedding   Wedding         @relation(fields: [weddingId], references: [id], onDelete: Cascade)
+  type      IntegrationType
+  enabled   Boolean         @default(true)
+  config    Json            @default("{}")
+  createdAt DateTime        @default(now()) @db.Timestamptz
+  updatedAt DateTime        @updatedAt @db.Timestamptz
+
+  secrets   IntegrationSecret[]
+
+  @@unique([weddingId, type])
+}
+
+/// Segredo cifrado (AES-256-GCM com MASTER_KEY). O front só vê `hint` (últimos 4).
+model IntegrationSecret {
+  id            String      @id @default(cuid())
+  integrationId String
+  integration   Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  key           String
+  valueEnc      String
+  hint          String?
+  updatedById   String?
+  updatedAt     DateTime    @updatedAt @db.Timestamptz
+
+  @@unique([integrationId, key])
+}
+
+enum ConnectionState {
+  CLOSED
+  CONNECTING
+  OPEN
+}
+
+model WhatsAppInstance {
+  id           String          @id @default(cuid())
+  weddingId    String
+  wedding      Wedding         @relation(fields: [weddingId], references: [id], onDelete: Cascade)
+  name         String          @unique
+  state        ConnectionState @default(CLOSED)
+  ownerJid     String?
+  profileName  String?
+  lastQr       String?
+  /// Hash do token secreto embutido na URL do webhook
+  webhookTokenHash String      @unique
+  lastCheckedAt DateTime?      @db.Timestamptz
+  createdAt    DateTime        @default(now()) @db.Timestamptz
+  updatedAt    DateTime        @updatedAt @db.Timestamptz
+
+  webhookEvents WebhookEvent[]
+}
+
+model MessageTemplate {
+  id        String   @id @default(cuid())
+  weddingId String
+  wedding   Wedding  @relation(fields: [weddingId], references: [id], onDelete: Cascade)
+  key       String
+  name      String
+  /// Variáveis: {{nome}}, {{familia}}, {{link}}, {{data}}, {{noivos}}, {{local}}
+  body      String
+  purpose   String   // INVITE, REMINDER, INFO, VENDOR, TASK, OTHER
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  campaigns MessageCampaign[]
+
+  @@unique([weddingId, key])
+}
+
+enum CampaignStatus {
+  DRAFT
+  QUEUED
+  RUNNING
+  COMPLETED
+  CANCELLED
+}
+
+model MessageCampaign {
+  id           String         @id @default(cuid())
+  weddingId    String
+  wedding      Wedding        @relation(fields: [weddingId], references: [id], onDelete: Cascade)
+  name         String
+  templateId   String?
+  template     MessageTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  body         String
+  /// Critérios de seleção usados (para registro)
+  criteria     Json           @default("{}")
+  status       CampaignStatus @default(DRAFT)
+  confirmedById String?
+  confirmedAt  DateTime?      @db.Timestamptz
+  cancelledAt  DateTime?      @db.Timestamptz
+  createdById  String?
+  createdAt    DateTime       @default(now()) @db.Timestamptz
+  updatedAt    DateTime       @updatedAt @db.Timestamptz
+
+  messages     OutboundMessage[]
+}
+
+enum MessageStatus {
+  PENDING    // na fila
+  SENDING    // em envio
+  ACCEPTED   // aceita pela Evolution (SERVER_ACK)
+  DELIVERED  // entregue no aparelho (DELIVERY_ACK)
+  READ       // lida (READ)
+  REPLIED    // respondida
+  FAILED
+  CANCELLED
+}
+
+model OutboundMessage {
+  id                String        @id @default(cuid())
+  weddingId         String
+  wedding           Wedding       @relation(fields: [weddingId], references: [id], onDelete: Cascade)
+  campaignId        String?
+  campaign          MessageCampaign? @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  guestId           String?
+  guest             Guest?        @relation(fields: [guestId], references: [id], onDelete: SetNull)
+  groupId           String?
+  vendorId          String?
+  toNumber          String
+  body              String
+  status            MessageStatus @default(PENDING)
+  /// Uma mensagem por (campanha, destinatário). Reenvio exige nova chave.
+  idempotencyKey    String        @unique
+  providerMessageId String?       @unique
+  attempts          Int           @default(0)
+  nextAttemptAt     DateTime      @default(now()) @db.Timestamptz
+  lastError         String?
+  sentAt            DateTime?     @db.Timestamptz
+  deliveredAt       DateTime?     @db.Timestamptz
+  readAt            DateTime?     @db.Timestamptz
+  repliedAt         DateTime?     @db.Timestamptz
+  createdById       String?
+  createdAt         DateTime      @default(now()) @db.Timestamptz
+  updatedAt         DateTime      @updatedAt @db.Timestamptz
+
+  attemptsLog       MessageAttempt[]
+
+  @@index([weddingId, status])
+  @@index([status, nextAttemptAt])
+  @@index([toNumber])
+}
+
+model MessageAttempt {
+  id        String          @id @default(cuid())
+  messageId String
+  message   OutboundMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  ok        Boolean
+  httpStatus Int?
+  error     String?
+  createdAt DateTime        @default(now()) @db.Timestamptz
+}
+
+model InboundMessage {
+  id                String   @id @default(cuid())
+  weddingId         String
+  wedding           Wedding  @relation(fields: [weddingId], references: [id], onDelete: Cascade)
+  providerMessageId String   @unique
+  fromNumber        String
+  pushName          String?
+  body              String?
+  receivedAt        DateTime @db.Timestamptz
+  guestIds          String[]
+  vendorId          String?
+  createdAt         DateTime @default(now()) @db.Timestamptz
+
+  @@index([weddingId, fromNumber])
+}
+
+/// Registro bruto de eventos recebidos (idempotência por eventKey)
+model WebhookEvent {
+  id          String    @id @default(cuid())
+  instanceId  String
+  instance    WhatsAppInstance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+  eventKey    String    @unique
+  event       String
+  payload     Json
+  receivedAt  DateTime  @default(now()) @db.Timestamptz
+  processedAt DateTime? @db.Timestamptz
+  error       String?
+
+  @@index([instanceId, receivedAt])
+}
+
+enum JobStatus {
+  QUEUED
+  RUNNING
+  DONE
+  FAILED
+  CANCELLED
+}
+
+/// Fila persistente no Postgres (SELECT … FOR UPDATE SKIP LOCKED)
+model Job {
+  id          String    @id @default(cuid())
+  type        String
+  payload     Json
+  status      JobStatus @default(QUEUED)
+  uniqueKey   String?   @unique
+  runAt       DateTime  @default(now()) @db.Timestamptz
+  attempts    Int       @default(0)
+  maxAttempts Int       @default(5)
+  lockedAt    DateTime? @db.Timestamptz
+  lockedBy    String?
+  lastError   String?
+  finishedAt  DateTime? @db.Timestamptz
+  createdAt   DateTime  @default(now()) @db.Timestamptz
+
+  @@index([status, runAt])
+}
+
+// ─────────────────────────── Arquivos e galeria ───────────────────────────
+
+model FileAsset {
+  id           String    @id @default(cuid())
+  weddingId    String
+  wedding      Wedding   @relation(fields: [weddingId], references: [id], onDelete: Cascade)
+  originalName String
+  mimeType     String
+  size         Int
+  sha256       String
+  /// Chave interna no armazenamento (nunca exposta ao front)
+  storageKey   String
+  category     String    @default("OTHER") // CONTRACT, RECEIPT, PHOTO, DOCUMENT, INSPIRATION, OTHER
+  description  String?
+  version      Int       @default(1)
+  /// Vínculo genérico: vendor, task, obligation, payment, contract, quote, income…
+  entityType   String?
+  entityId     String?
+  uploadedById String?
+  deletedAt    DateTime? @db.Timestamptz
+  deletedById  String?
+  createdAt    DateTime  @default(now()) @db.Timestamptz
+  updatedAt    DateTime  @updatedAt @db.Timestamptz
+
+  versions     FileVersion[]
+  albumItems   PhotoAlbumItem[]
+  analyses     DocumentAnalysis[]
+
+  @@index([weddingId, category])
+  @@index([entityType, entityId])
+}
+
+model FileVersion {
+  id           String    @id @default(cuid())
+  fileId       String
+  file         FileAsset @relation(fields: [fileId], references: [id], onDelete: Cascade)
+  version      Int
+  storageKey   String
+  originalName String
+  size         Int
+  sha256       String
+  mimeType     String
+  createdById  String?
+  createdAt    DateTime  @default(now()) @db.Timestamptz
+
+  @@unique([fileId, version])
+}
+
+model PhotoAlbum {
+  id          String   @id @default(cuid())
+  weddingId   String
+  wedding     Wedding  @relation(fields: [weddingId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now()) @db.Timestamptz
+
+  items       PhotoAlbumItem[]
+}
+
+model PhotoAlbumItem {
+  id        String     @id @default(cuid())
+  albumId   String
+  album     PhotoAlbum @relation(fields: [albumId], references: [id], onDelete: Cascade)
+  fileId    String
+  file      FileAsset  @relation(fields: [fileId], references: [id], onDelete: Cascade)
+  caption   String?
+  tags      String[]
+  notes     String?
+  vendorId  String?
+  vendor    Vendor?    @relation(fields: [vendorId], references: [id], onDelete: SetNull)
+  createdAt DateTime   @default(now()) @db.Timestamptz
+
+  @@unique([albumId, fileId])
+}
+
+// ─────────────────────────── Inteligência artificial ───────────────────────────
+
+model AIConversation {
+  id        String   @id @default(cuid())
+  weddingId String
+  wedding   Wedding  @relation(fields: [weddingId], references: [id], onDelete: Cascade)
+  userId    String
+  title     String?
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  messages  AIMessage[]
+  proposals AIActionProposal[]
+
+  @@index([weddingId, userId])
+}
+
+model AIMessage {
+  id             String         @id @default(cuid())
+  conversationId String
+  conversation   AIConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  role           String         // user, assistant
+  content        String
+  /// Registros consultados: [{ type, id, label }]
+  sources        Json           @default("[]")
+  toolCalls      Json           @default("[]")
+  inputTokens    Int            @default(0)
+  outputTokens   Int            @default(0)
+  createdAt      DateTime       @default(now()) @db.Timestamptz
+}
+
+enum ProposalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  EXECUTED
+  FAILED
+}
+
+/// Alteração sugerida pela IA. Só executa após aprovação explícita de um usuário autorizado.
+model AIActionProposal {
+  id             String         @id @default(cuid())
+  weddingId      String
+  wedding        Wedding        @relation(fields: [weddingId], references: [id], onDelete: Cascade)
+  conversationId String?
+  conversation   AIConversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  action         String         // createTask, createReminder, createVendor, createObligation, updateTask…
+  summary        String
+  payload        Json
+  currentData    Json?
+  origin         String?
+  impact         String?
+  requiredPermission String
+  status         ProposalStatus @default(PENDING)
+  decidedById    String?
+  decidedAt      DateTime?      @db.Timestamptz
+  executedAt     DateTime?      @db.Timestamptz
+  result         Json?
+  error          String?
+  createdById    String?
+  createdAt      DateTime       @default(now()) @db.Timestamptz
+
+  @@index([weddingId, status])
+}
+
+enum AnalysisStatus {
+  QUEUED
+  RUNNING
+  DONE
+  FAILED
+}
+
+model DocumentAnalysis {
+  id            String         @id @default(cuid())
+  weddingId     String
+  wedding       Wedding        @relation(fields: [weddingId], references: [id], onDelete: Cascade)
+  fileId        String
+  file          FileAsset      @relation(fields: [fileId], references: [id], onDelete: Cascade)
+  status        AnalysisStatus @default(QUEUED)
+  extractedText String?
+  pages         Int?
+  summary       Json?
+  model         String?
+  inputTokens   Int            @default(0)
+  outputTokens  Int            @default(0)
+  error         String?
+  requestedById String?
+  createdAt     DateTime       @default(now()) @db.Timestamptz
+  finishedAt    DateTime?      @db.Timestamptz
+
+  findings      DocumentAnalysisFinding[]
+}
+
+model DocumentAnalysisFinding {
+  id             String           @id @default(cuid())
+  analysisId     String
+  analysis       DocumentAnalysis @relation(fields: [analysisId], references: [id], onDelete: Cascade)
+  topic          String           // parties, object, values, installments, dates, penalties, cancellation…
+  title          String
+  /// Texto expresso no documento (citação)
+  quote          String?
+  location       String?          // página / cláusula
+  /// Interpretação gerada pela IA (não é parecer jurídico)
+  interpretation String?
+  risk           String           @default("LOW") // LOW, MEDIUM, HIGH
+  riskReason     String?
+  sortOrder      Int              @default(0)
+}
+
+model AIUsage {
+  id           String   @id @default(cuid())
+  weddingId    String
+  userId       String?
+  feature      String   // chat, analysis
+  model        String
+  inputTokens  Int
+  outputTokens Int
+  createdAt    DateTime @default(now()) @db.Timestamptz
+
+  @@index([weddingId, createdAt])
+}
+
+// ─────────────────────────── Governança ───────────────────────────
+
+/// Somente inserção. Não há rota de edição/exclusão.
+model AuditLog {
+  id            String   @id @default(cuid())
+  weddingId     String?
+  wedding       Wedding? @relation(fields: [weddingId], references: [id], onDelete: SetNull)
+  userId        String?
+  userName      String?
+  action        String   // create, update, delete, cancel, pay, reverse, approve, send, export, login…
+  entityType    String
+  entityId      String?
+  summary       String
+  changes       Json?
+  origin        String   @default("web") // web, portal, ai, webhook, worker, system
+  result        String   @default("success")
+  correlationId String?
+  ip            String?
+  createdAt     DateTime @default(now()) @db.Timestamptz
+
+  @@index([weddingId, createdAt])
+  @@index([entityType, entityId])
+}
+
+model SecurityEvent {
+  id        String   @id @default(cuid())
+  type      String   // login_failed, forbidden, rate_limited, invalid_webhook, invalid_token…
+  userId    String?
+  weddingId String?
+  ip        String?
+  details   Json?
+  createdAt DateTime @default(now()) @db.Timestamptz
+
+  @@index([type, createdAt])
+}
+
+model DataExportRequest {
+  id          String    @id @default(cuid())
+  weddingId   String
+  requestedById String
+  subjectType String    // guest, user, wedding
+  subjectId   String
+  status      String    @default("DONE")
+  createdAt   DateTime  @default(now()) @db.Timestamptz
+}
+
+model DataDeletionRequest {
+  id          String    @id @default(cuid())
+  weddingId   String
+  requestedById String
+  subjectType String
+  subjectId   String
+  reason      String?
+  status      String    @default("PENDING") // PENDING, DONE, REJECTED
+  resolvedAt  DateTime? @db.Timestamptz
+  resolution  String?
+  createdAt   DateTime  @default(now()) @db.Timestamptz
+}
+
+model BackupExecution {
+  id         String    @id @default(cuid())
+  startedAt  DateTime  @default(now()) @db.Timestamptz
+  finishedAt DateTime? @db.Timestamptz
+  status     String    // RUNNING, DONE, FAILED
+  location   String?
+  sizeBytes  BigInt?
+  sha256     String?
+  verifiedAt DateTime? @db.Timestamptz
+  error      String?
+}
+
+/// Contador de limite de requisições (portal público, login, webhooks)
+model RateLimitBucket {
+  key       String   @id
+  count     Int
+  resetAt   DateTime @db.Timestamptz
+}
+
+// ─────────────────────────── Mapa de mesas ───────────────────────────
+
+enum TableShape {
+  ROUND
+  RECT
+  LONG
+}
+
+model SeatingTable {
+  id        String     @id @default(cuid())
+  weddingId String
+  wedding   Wedding    @relation(fields: [weddingId], references: [id], onDelete: Cascade)
+  name      String
+  shape     TableShape @default(ROUND)
+  capacity  Int        @default(8)
+  /// Posição no salão (0–1000 em cada eixo) e rotação em graus
+  x         Int        @default(100)
+  y         Int        @default(100)
+  rotation  Int        @default(0)
+  zone      String?
+  notes     String?
+  sortOrder Int        @default(0)
+  createdAt DateTime   @default(now()) @db.Timestamptz
+  updatedAt DateTime   @updatedAt @db.Timestamptz
+
+  guests    Guest[]
+
+  @@index([weddingId])
+}
+
+// ─────────────────────────── Presentes (Pix) ───────────────────────────
+
+enum GiftKind {
+  ITEM   // item com valor (ex.: "Jantar na lua de mel")
+  QUOTA  // cotas de um valor (ex.: 10 cotas de R$ 100)
+  FREE   // valor livre
+  STORE  // produto em loja (Amazon etc.), com link de afiliado; o convidado compra lá
+}
+
+model GiftItem {
+  id          String    @id @default(cuid())
+  weddingId   String
+  wedding     Wedding   @relation(fields: [weddingId], references: [id], onDelete: Cascade)
+  title       String
+  description String?
+  imageFileId String?
+  kind        GiftKind  @default(ITEM)
+  priceCents  Int?
+  quotaCount  Int?
+  externalUrl String?
+  /// Cliques no link da loja (pelo portal)
+  clickCount  Int       @default(0)
+  active      Boolean   @default(true)
+  sortOrder   Int       @default(0)
+  createdAt   DateTime  @default(now()) @db.Timestamptz
+  updatedAt   DateTime  @updatedAt @db.Timestamptz
+
+  contributions GiftContribution[]
+
+  @@index([weddingId])
+}
+
+enum GiftStatus {
+  PLEDGED    // convidado avisou que pagou (aguarda conferência)
+  CONFIRMED  // casal conferiu o recebimento → vira entrada recebida
+  REJECTED   // não recebido / engano
+}
+
+enum ThankYouStatus {
+  PENDING
+  SENT
+  NOT_NEEDED
+}
+
+/// Presente recebido: em dinheiro (Pix/outro) ou físico (registrado pelo casal). Base do controle de agradecimentos.
+model GiftContribution {
+  id             String         @id @default(cuid())
+  weddingId      String
+  wedding        Wedding        @relation(fields: [weddingId], references: [id], onDelete: Cascade)
+  giftItemId     String?
+  giftItem       GiftItem?      @relation(fields: [giftItemId], references: [id], onDelete: SetNull)
+  groupId        String?
+  group          GuestGroup?    @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  guestId        String?
+  guest          Guest?         @relation(fields: [guestId], references: [id], onDelete: SetNull)
+  giverName      String
+  message        String?
+  /// Presente físico: sem valor (descrição do que foi dado)
+  physicalDescription String?
+  amountCents    Int?
+  quotas         Int?
+  method         PaymentMethod?
+  status         GiftStatus     @default(PLEDGED)
+  source         String         @default("PORTAL") // PORTAL, ADMIN
+  /// Entrada financeira criada ao confirmar (não duplica receita)
+  incomeId       String?        @unique
+  income         Income?        @relation(fields: [incomeId], references: [id], onDelete: SetNull)
+  thankYouStatus ThankYouStatus @default(PENDING)
+  thankYouSentAt DateTime?      @db.Timestamptz
+  thankYouNote   String?
+  submissionKey  String?        @unique
+  ip             String?
+  reviewedById   String?
+  reviewedAt     DateTime?      @db.Timestamptz
+  createdAt      DateTime       @default(now()) @db.Timestamptz
+  updatedAt      DateTime       @updatedAt @db.Timestamptz
+
+  @@index([weddingId, status])
+}
+
+// ─────────────────────────── Fotos dos convidados ───────────────────────────
+
+enum ModerationStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model GuestPhoto {
+  id           String           @id @default(cuid())
+  weddingId    String
+  wedding      Wedding          @relation(fields: [weddingId], references: [id], onDelete: Cascade)
+  fileId       String           @unique
+  groupId      String?
+  group        GuestGroup?      @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  uploaderName String
+  caption      String?
+  status       ModerationStatus @default(PENDING)
+  reviewedById String?
+  reviewedAt   DateTime?        @db.Timestamptz
+  ip           String?
+  createdAt    DateTime         @default(now()) @db.Timestamptz
+
+  @@index([weddingId, status])
+}
+
+// ─────────────────────────── Notificações push ───────────────────────────
+
+model PushSubscription {
+  id         String    @id @default(cuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  endpoint   String    @unique
+  p256dh     String
+  auth       String
+  userAgent  String?
+  lastUsedAt DateTime? @db.Timestamptz
+  createdAt  DateTime  @default(now()) @db.Timestamptz
+
+  @@index([userId])
+}
+
+/// Segredos da plataforma (ex.: chave privada VAPID), cifrados com a MASTER_KEY
+model SystemSecret {
+  key       String   @id
+  valueEnc  String
+  updatedAt DateTime @updatedAt @db.Timestamptz
+}
+
+/// Notificações já enviadas (evita repetir o mesmo aviso)
+model NotificationLog {
+  id        String   @id @default(cuid())
+  weddingId String
+  userId    String
+  dedupeKey String
+  event     String
+  title     String
+  body      String?
+  url       String?
+  readAt    DateTime? @db.Timestamptz
+  createdAt DateTime @default(now()) @db.Timestamptz
+
+  @@unique([userId, dedupeKey])
+  @@index([userId, createdAt])
+}
