@@ -1,6 +1,6 @@
 import { CouplePhotosPanel } from "@/components/app/CouplePhotos";
 import { AppearancePanel } from "@/components/app/AppearancePanel";
-import { Bot, KeyRound, Lock, MessageCircle, RotateCcw, ShieldCheck, Trash2, X } from "lucide-react";
+import { Bot, KeyRound, Lock, Mail, MessageCircle, RotateCcw, ShieldCheck, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router";
 import { toast } from "sonner";
@@ -319,6 +319,38 @@ function AiCard({ data, providers }: { data: Integrations["ai"]; providers: Inte
   );
 }
 
+function EmailCard({ data }: { data: Integrations["email"] }) {
+  const { can } = useMe();
+  const utils = trpc.useUtils();
+  const editable = can("integrations:edit");
+  const cfg = data.config as { from?: string; replyTo?: string | null };
+  const [f, setF] = useState({ enabled: data.enabled, from: cfg.from ?? "", replyTo: cfg.replyTo ?? "", apiKey: undefined as string | null | undefined });
+  const save = trpc.settings.saveEmail.useMutation({
+    onSuccess: () => { toast.success("E-mail salvo"); setF((x) => ({ ...x, apiKey: undefined })); utils.settings.integrations.invalidate(); },
+    onError: (e) => toast.error(e.message),
+  });
+  const test = trpc.settings.testEmail.useMutation({
+    onSuccess: (r) => (r.ok ? toast.success(`E-mail de teste enviado para ${r.to}`) : toast.error(r.error ?? "Falhou")),
+    onError: (e) => toast.error(e.message),
+  });
+  return (
+    <Section title={<span className="flex items-center gap-2"><Mail className="size-5 text-primary" /> E-mail (Resend)</span>} description="Convites da equipe, redefinição de senha e lembretes. Verifique o domínio do remetente no Resend antes de ativar." actions={<Button asChild variant="outline" size="sm"><a href="https://resend.com/domains" target="_blank" rel="noreferrer">Abrir Resend</a></Button>}>
+      <form className="grid gap-4 md:grid-cols-2" onSubmit={(e) => { e.preventDefault(); if (!f.from.trim()) return toast.error("Informe o remetente"); save.mutate({ enabled: f.enabled, from: f.from.trim(), replyTo: f.replyTo.trim(), apiKey: f.apiKey }); }}>
+        <Field label="Ativado"><div className="flex h-9 items-center"><Switch checked={f.enabled} disabled={!editable} onCheckedChange={(v) => setF({ ...f, enabled: v })} /></div></Field>
+        <TextField label="Remetente" placeholder="Casamento <nao-responda@seudominio.com.br>" hint="O domínio precisa estar verificado no Resend" value={f.from} onChange={(v) => setF({ ...f, from: v })} disabled={!editable} />
+        <TextField label="Responder para (opcional)" placeholder="voces@email.com" type="email" value={f.replyTo} onChange={(v) => setF({ ...f, replyTo: v })} disabled={!editable} />
+        <SecretField label="Chave da API (re_…)" info={data.secrets.apiKey as SecretInfo} value={f.apiKey} onChange={(v) => setF({ ...f, apiKey: v })} disabled={!editable} />
+        {editable && (
+          <div className="flex items-end justify-end gap-2 md:col-span-2">
+            <LoadingButton type="button" variant="outline" loading={test.isPending} disabled={!data.secrets.apiKey || !cfg.from} onClick={() => test.mutate()}>Enviar teste para mim</LoadingButton>
+            <LoadingButton type="submit" loading={save.isPending}>Salvar</LoadingButton>
+          </div>
+        )}
+      </form>
+    </Section>
+  );
+}
+
 function IntegrationsTab() {
   const q = trpc.settings.integrations.useQuery();
   return (
@@ -332,6 +364,7 @@ function IntegrationsTab() {
           <>
             <EvolutionCard data={d.evolution} />
             <AiCard data={d.ai} providers={d.aiProviders} />
+            <EmailCard data={d.email} />
           </>
         )}
       </QueryState>
@@ -366,7 +399,7 @@ function PrivacyTab() {
           <div><b>Necessidade.</b> <span className="text-muted-foreground">Coletamos o mínimo (nome, contato, restrições informadas). E-mail é opcional; telefone não identifica a pessoa.</span></div>
           <div><b>Retenção.</b> <span className="text-muted-foreground">Arquivos excluídos são removidos após o prazo configurado. Registros financeiros e de auditoria são mantidos por obrigação de prestação de contas.</span></div>
           <div><b>Direitos do titular.</b> <span className="text-muted-foreground">Consulta e exportação (no cadastro do convidado), correção pelas telas normais e exclusão por pedido registrado aqui, executada por anonimização.</span></div>
-          <div className="md:col-span-2"><b>Provedores externos.</b> <span className="text-muted-foreground">A Evolution API recebe o telefone e o texto de cada mensagem enviada. O provedor de IA recebe somente o necessário para responder (totais, nomes de registros e, se permitido abaixo, nomes de convidados) e o texto dos documentos enviados para análise.</span></div>
+          <div className="md:col-span-2"><b>Provedores externos.</b> <span className="text-muted-foreground">A Evolution API recebe o telefone e o texto de cada mensagem enviada. O Resend recebe o e-mail do destinatário e o conteúdo de cada e-mail. O provedor de IA recebe somente o necessário para responder (totais, nomes de registros e, se permitido abaixo, nomes de convidados) e o texto dos documentos enviados para análise.</span></div>
         </div>
         {share && (
           <div className="mt-4 flex items-center justify-between gap-4 rounded-xl border p-3">

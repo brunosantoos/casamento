@@ -1,4 +1,4 @@
-import { AI_PROVIDERS, allSettings, audit, integrationView, resetSetting, saveIntegration, setSetting, testAi, readSecret, type AiProvider } from "@casa/core";
+import { AI_PROVIDERS, allSettings, audit, emailLayout, integrationView, resetSetting, saveIntegration, sendViaResend, setSetting, testAi, readSecret, type AiProvider } from "@casa/core";
 import { prisma, type Prisma } from "@casa/db";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
@@ -24,8 +24,29 @@ export const settingsRouter = router({
   integrations: perm("integrations:view").query(async ({ ctx }) => ({
     evolution: await integrationView(ctx.weddingId, "EVOLUTION"),
     ai: await integrationView(ctx.weddingId, "AI"),
+    email: await integrationView(ctx.weddingId, "EMAIL"),
     aiProviders: AI_PROVIDERS,
   })),
+  // Remetente: "Nome <email@dominio>" ou só o e-mail, com domínio verificado no Resend
+  saveEmail: perm("integrations:edit").input(z.object({ enabled: z.boolean(), from: z.string().trim().min(5).max(200).regex(/^([^<>]+<[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+>|[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+)$/, "Remetente inválido — use Nome <email@dominio.com>"), replyTo: z.string().trim().email().or(z.literal("")).optional(), apiKey: z.string().min(8).max(500).nullable().optional() })).mutation(({ ctx, input }) =>
+    saveIntegration(ctx.svc.actor, ctx.weddingId, "EMAIL", { enabled: input.enabled, config: { provider: "RESEND", from: input.from, replyTo: input.replyTo || null }, secrets: input.apiKey === undefined ? {} : { apiKey: input.apiKey } }).then(() => undefined),
+  ),
+  /** Envia um e-mail de teste para quem clicou, com a configuração salva deste casamento */
+  testEmail: perm("integrations:edit").mutation(async ({ ctx }) => {
+    const v = await integrationView(ctx.weddingId, "EMAIL");
+    const apiKey = await readSecret(ctx.weddingId, "EMAIL", "apiKey");
+    if (!apiKey || !v.config.from) return { ok: false, to: ctx.user.email, error: "Salve o remetente e a chave antes de testar" };
+    try {
+      await sendViaResend({ from: String(v.config.from), replyTo: (v.config.replyTo as string) || null, apiKey }, {
+        to: ctx.user.email, subject: "Teste de e-mail · Casamento",
+        html: emailLayout("Tudo certo!", `<p>Este é um e-mail de teste enviado pelo painel de <b>${ctx.wedding.name}</b>. Convites, redefinição de senha e lembretes sairão por este remetente.</p>`),
+        text: "Este é um e-mail de teste enviado pelo painel do casamento.",
+      });
+      return { ok: true, to: ctx.user.email };
+    } catch (e) {
+      return { ok: false, to: ctx.user.email, error: (e as Error).message.slice(0, 300) };
+    }
+  }),
   saveEvolution: perm("integrations:edit").input(z.object({ enabled: z.boolean(), baseUrl: z.string().url(), webhookBaseUrl: z.string().url().or(z.literal("")).optional(), apiKey: z.string().min(8).max(500).nullable().optional() })).mutation(({ ctx, input }) =>
     saveIntegration(ctx.svc.actor, ctx.weddingId, "EVOLUTION", { enabled: input.enabled, config: { baseUrl: input.baseUrl, webhookBaseUrl: input.webhookBaseUrl || null }, secrets: input.apiKey === undefined ? {} : { apiKey: input.apiKey } }).then(() => undefined),
   ),

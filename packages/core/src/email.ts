@@ -1,4 +1,6 @@
+import { prisma } from "@casa/db";
 import nodemailer from "nodemailer";
+import { decrypt } from "./crypto.js";
 import { env } from "./env.js";
 
 let transport: nodemailer.Transporter | null | undefined;
@@ -12,11 +14,45 @@ function getTransport() {
   return transport;
 }
 
-/** Sem SMTP configurado, registra no log (desenvolvimento) — nunca falha silenciosamente em produção */
-export async function sendEmail(to: string, subject: string, html: string, text?: string) {
+export type EmailConfig = { from: string; replyTo: string | null; apiKey: string };
+
+/**
+ * Configuração de e-mail (Resend) cadastrada no painel. Com weddingId, usa a daquele casamento;
+ * sem ele (ex.: redefinição de senha), usa a primeira integração ativa da instalação.
+ */
+export async function emailConfig(weddingId?: string): Promise<EmailConfig | null> {
+  const i = await prisma.integration.findFirst({
+    where: { type: "EMAIL", enabled: true, ...(weddingId ? { weddingId } : {}) },
+    include: { secrets: true },
+    orderBy: { createdAt: "asc" },
+  });
+  const key = i?.secrets.find((s) => s.key === "apiKey");
+  const cfg = (i?.config ?? {}) as { from?: string; replyTo?: string | null };
+  if (!i || !key || !cfg.from) return weddingId ? emailConfig() : null;
+  return { from: cfg.from, replyTo: cfg.replyTo || null, apiKey: decrypt(key.valueEnc) };
+}
+
+/** Envio pela API HTTP do Resend (https://resend.com/docs/api-reference/emails/send-email) */
+export async function sendViaResend(cfg: EmailConfig, msg: { to: string; subject: string; html: string; text?: string }) {
+  const res = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${cfg.apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ from: cfg.from, to: [msg.to], subject: msg.subject, html: msg.html, text: msg.text, ...(cfg.replyTo ? { reply_to: cfg.replyTo } : {}) }),
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { message?: string } | null;
+    throw new Error(`Resend ${res.status}: ${body?.message ?? res.statusText}`);
+  }
+}
+
+/** Ordem: Resend do painel → SMTP do ambiente → log (só em desenvolvimento; em produção falha) */
+export async function sendEmail(to: string, subject: string, html: string, text?: string, weddingId?: string) {
+  const cfg = await emailConfig(weddingId);
+  if (cfg) return sendViaResend(cfg, { to, subject, html, text });
   const t = getTransport();
   if (!t) {
-    if (process.env.NODE_ENV === "production") throw new Error("SMTP não configurado");
+    if (process.env.NODE_ENV === "production") throw new Error("E-mail não configurado (Configurações → Integrações)");
     console.log(`[email:dev] para=${to} assunto="${subject}"\n${text ?? html.replace(/<[^>]+>/g, " ")}`);
     return;
   }

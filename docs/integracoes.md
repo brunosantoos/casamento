@@ -35,3 +35,11 @@ Provedor, modelo e chave em Configurações → Integrações.
   PDF escaneado sem camada de texto: o sistema pede o envio das páginas como imagem (limitação documentada).
 - **Custos**: `AIUsage` por chamada e limite mensal de tokens (`ai.monthlyTokenLimit`).
 - **Privacidade**: `ai.shareGuestData` controla se nomes de convidados podem ir ao provedor.
+
+## E-mail (Resend)
+
+Configurado em **Configurações → Integrações → E-mail (Resend)**: remetente (`Nome <email@dominio>`, com o domínio
+verificado no Resend), "responder para" opcional e a chave `re_…` (cifrada como as demais). O botão **Enviar teste para mim**
+manda um e-mail para quem está logado. Convites da equipe e lembretes usam a configuração do casamento; a redefinição de
+senha (sem casamento no contexto) usa a primeira integração ativa da instalação. Sem Resend, cai no SMTP do ambiente
+(`SMTP_*`); sem nenhum dos dois, em produção o envio falha com erro (nunca some em silêncio).

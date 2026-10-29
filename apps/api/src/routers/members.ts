@@ -32,7 +32,7 @@ export const membersRouter = router({
     await prisma.invitation.updateMany({ where: { weddingId: ctx.weddingId, email: input.email, acceptedAt: null, revokedAt: null }, data: { revokedAt: new Date() } });
     const inv = await prisma.invitation.create({ data: { weddingId: ctx.weddingId, email: input.email, name: input.name, roleId: role.id, tokenHash: tokenHash(token), expiresAt: new Date(Date.now() + 7 * 86400_000), invitedById: ctx.user.id } });
     const url = `${env().WEB_ORIGIN}/convite/${token}`;
-    await sendEmail(input.email, `Convite para o planejamento de ${ctx.wedding.name}`, emailLayout(`Você foi convidado(a)`, `<p>${ctx.user.name} convidou você para ajudar no planejamento de <b>${ctx.wedding.name}</b> como <b>${role.name}</b>.</p><p style="color:#666;font-size:13px">O convite vale por 7 dias.</p>`, { label: "Aceitar convite", url }), `Aceite o convite: ${url}`);
+    await sendEmail(input.email, `Convite para o planejamento de ${ctx.wedding.name}`, emailLayout(`Você foi convidado(a)`, `<p>${ctx.user.name} convidou você para ajudar no planejamento de <b>${ctx.wedding.name}</b> como <b>${role.name}</b>.</p><p style="color:#666;font-size:13px">O convite vale por 7 dias.</p>`, { label: "Aceitar convite", url }), `Aceite o convite: ${url}`, ctx.weddingId);
     await audit(ctx.svc.actor, { weddingId: ctx.weddingId, action: "create", entityType: "invitation", entityId: inv.id, summary: `Convidou ${input.email} como ${role.name}` });
     return { id: inv.id, url };
   }),

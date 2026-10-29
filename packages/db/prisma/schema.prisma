@@ -1119,6 +1119,7 @@ enum IntegrationType {
   EVOLUTION
   AI
   SMTP
+  EMAIL
 }
 
 /// Configuração não secreta. Segredos ficam em IntegrationSecret, cifrados.

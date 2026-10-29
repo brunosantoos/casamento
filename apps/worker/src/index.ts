@@ -66,7 +66,7 @@ async function sendReminders() {
       title = `Compromisso: ${e.title} — ${e.startsAt.toLocaleString("pt-BR")}`;
       link += `/calendario?evento=${e.id}`;
     }
-    await sendEmail(user.email, `Lembrete · ${title}`, emailLayout("Lembrete", `<p>${title}</p>`, { label: "Abrir", url: link })).catch((e) => console.warn("[lembrete]", e.message));
+    await sendEmail(user.email, `Lembrete · ${title}`, emailLayout("Lembrete", `<p>${title}</p>`, { label: "Abrir", url: link }), undefined, r.weddingId).catch((e) => console.warn("[lembrete]", e.message));
   }
 }
 
@@ -93,7 +93,7 @@ async function dailyInstallmentReminders() {
       const sent = await prisma.reminder.findFirst({ where: { entityType: "installment-digest", entityId: key, userId: m.userId } });
       if (sent) continue;
       await prisma.reminder.create({ data: { weddingId: w.id, entityType: "installment-digest", entityId: key, userId: m.userId, remindAt: new Date(), sentAt: new Date() } });
-      await sendEmail(m.user.email, `Parcelas vencendo em ${days} dia(s)`, emailLayout("Parcelas a vencer", `<ul>${list}</ul>`, { label: "Ver contas a pagar", url: `${env().WEB_ORIGIN}/financeiro/pagar` })).catch((e) => console.warn("[parcelas]", e.message));
+      await sendEmail(m.user.email, `Parcelas vencendo em ${days} dia(s)`, emailLayout("Parcelas a vencer", `<ul>${list}</ul>`, { label: "Ver contas a pagar", url: `${env().WEB_ORIGIN}/financeiro/pagar` }), undefined, w.id).catch((e) => console.warn("[parcelas]", e.message));
     }
   }
 }
